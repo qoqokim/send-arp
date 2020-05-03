@@ -29,9 +29,9 @@ struct arp_header {
     uint8_t pro_len;
     uint16_t op;
     uint8_t src_mac[6];
-    uint8_t src_ip[4];
+    in_addr src_ip;
     uint8_t dst_mac[6];
-    uint8_t dst_ip[4]; ;
+    in_addr dst_ip;
 };
 #pragma pack(pop)
 
@@ -55,6 +55,44 @@ void usage() {
     printf("sample : send-arp wlan0 192.168.35.203 192.168.35.1\n");
 }
 
+uint8_t* get_mac(char *dev) {
+    int i;
+    struct ifreq s;
+    static uint8_t mymac[6];
+    int fd = socket(PF_INET, SOCK_DGRAM, IPPROTO_IP);
+
+    strcpy(s.ifr_name, dev);
+
+    if (0 == ioctl(fd, SIOCGIFHWADDR, &s)) {
+        for (i=0;i<6;i++) {
+            mymac[i] = s.ifr_addr.sa_data[i];
+        }
+    } else {
+        printf("!!! getmac error !!!\n");
+        exit(1);
+    }
+    return mymac;
+}
+
+uint8_t* get_ip(char * dev) {
+    struct ifreq ifr;
+    static uint8_t mip[4];
+    struct sockaddr_in *sin ; //= (struct sockaddr_in *)&their_addr;
+    int n = socket(AF_INET, SOCK_DGRAM, 0);
+
+    strncpy(ifr.ifr_name, dev, IFNAMSIZ);
+
+    if (0 == ioctl(n, SIOCGIFADDR, &ifr)) {
+        sin = reinterpret_cast<struct sockaddr_in *>(&ifr.ifr_addr);
+        u_char *myip = (u_char *)&sin -> sin_addr.s_addr;
+        memcpy(&mip[0],myip,4);
+    }
+    else {
+        printf("!!! myip error !!!\n");
+        exit(1);
+    }
+    return mip;
+}
 
 int main(int argc, char* argv[]) {
     if (argc != 4) {
@@ -68,35 +106,8 @@ int main(int argc, char* argv[]) {
     int i;
     char v_mac[6];
 
-    struct ifreq s;
-    uint8_t mymac[6];
-    int fd = socket(PF_INET, SOCK_DGRAM, IPPROTO_IP);
-
-    strcpy(s.ifr_name, dev);
-
-    if (0 == ioctl(fd, SIOCGIFHWADDR, &s)) {
-        for (i=0;i<6;i++) {
-            mymac[i] = s.ifr_addr.sa_data[i];
-        }
-    } else {
-        printf("!!! getmac error !!!\n");
-    }
-
-    struct ifreq ifr;
-    uint8_t mip[4];
-    struct sockaddr_in *sin ; //= (struct sockaddr_in *)&their_addr;
-    int n = socket(AF_INET, SOCK_DGRAM, 0);
-
-    strncpy(ifr.ifr_name, dev, IFNAMSIZ);
-
-    if (0 == ioctl(n, SIOCGIFADDR, &ifr)) {
-        sin = reinterpret_cast<struct sockaddr_in *>(&ifr.ifr_addr);
-        u_char *myip = (u_char *)&sin -> sin_addr.s_addr;
-        memcpy(&mip[0],myip,4);
-    }
-    else {
-        printf("!!! myip error !!!\n");
-    }
+    uint8_t *mymac = get_mac(dev);
+    uint8_t *mip = get_ip(dev);
 
     char errbuf[PCAP_ERRBUF_SIZE];
     pcap_t* handle = pcap_open_live(dev, BUFSIZ, 1, 1000, errbuf);
@@ -108,12 +119,15 @@ int main(int argc, char* argv[]) {
     static const int MACsize = 6;
     static const int IPsize = 4;
 
+
     EtherARPpacket reqpacket;
 
     for (i=0;i<6;i++) {
         reqpacket.eth_.ether_dhost[i] = 0xff;
     }
-    memcpy(&reqpacket.eth_.ether_shost,&mymac,6);
+    for (i=0;i<6;i++) {
+        reqpacket.eth_.ether_shost[i] = mymac[i];
+    }
     reqpacket.eth_.ether_type = htons(Arp);
 
     reqpacket.arp_.hrd_t = htons(ETHER);
@@ -121,8 +135,10 @@ int main(int argc, char* argv[]) {
     reqpacket.arp_.hrd_len = MACsize;
     reqpacket.arp_.pro_len = IPsize;
     reqpacket.arp_.op = htons(Requset);
-    memcpy(&reqpacket.arp_.src_mac,&mymac[0],6);
-    memcpy(&reqpacket.arp_.src_ip, &mip[0], 4);
+    for (i=0;i<6;i++) {
+        reqpacket.arp_.src_mac[i] = mymac[i];
+    }
+    memcpy(&reqpacket.arp_.src_ip, &mip, 4);
     for (i=0;i<6;i++) {
         reqpacket.arp_.dst_mac[i] = 0x00;
     }
@@ -134,45 +150,48 @@ int main(int argc, char* argv[]) {
     }
 
     while(1) {
-        struct pcap_pkthdr* header;
-        const u_char* packet;
-        int res = pcap_next_ex(handle, &header, &packet);
-        if (res == 0) continue;
-        if (res == -1 || res == -2) {
-            printf(" pcap_next_ex error \n");
-            return -1;
-        }
+            struct pcap_pkthdr* header;
+            const u_char* packet;
+            int res = pcap_next_ex(handle, &header, &packet);
+            if (res == 0) continue;
+            if (res == -1 || res == -2) {
+                printf(" pcap_next_ex error \n");
+                return -1;
+            }
 
-        struct ether_header *ether;
-        ether = (struct ether_header*)packet;
-        u_short eth_type;
-        eth_type = ntohs(ether->ether_type);
+            struct ether_header *ether;
+            ether = (struct ether_header*)packet;
+            u_short eth_type;
+            eth_type = ntohs(ether->ether_type);
 
-        if(eth_type == Arp){
-            packet += sizeof(struct ether_header);
-            struct arp_header* arp;
-            arp = (struct arp_header*)packet;
-            if (ntohs(arp->op) == Reply) {
-                for (i=0;i<6;i++) {
-                    v_mac[i]=ether->ether_shost[i];
+            if(eth_type == Arp){
+                packet += sizeof(struct ether_header);
+                struct arp_header* arp = (struct arp_header*)packet;
+                if (ntohs(arp->op) == Reply) {
+                    for (i=0;i<6;i++) {
+                        v_mac[i]=ether->ether_shost[i];
+                    }
+                    break;
                 }
-                break;
+                else {
+                    printf("Not Reply...\n");
+                    return 0;
+                }
             }
             else {
-                printf("Not Reply...%x\n",arp->op);
+                printf("Type is not ARP ...\n");
                 return 0;
             }
-        }
-        else {
-            printf("Type is not ARP ...\n");
-        }
     }
-
 
     EtherARPpacket reppacket;
 
-    memcpy(&reppacket.eth_.ether_dhost,&v_mac[0],6);
-    memcpy(&reppacket.eth_.ether_shost,&mymac[0],6);
+    for (i=0;i<6;i++) {
+        reppacket.eth_.ether_dhost[i] = v_mac[i];
+    }
+    for (i=0;i<6;i++) {
+        reppacket.eth_.ether_shost[i] = mymac[i];
+    }
     reppacket.eth_.ether_type = htons(Arp);
 
     reppacket.arp_.hrd_t = htons(ETHER);
