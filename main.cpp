@@ -28,10 +28,10 @@ struct arp_header {
     uint8_t hrd_len;
     uint8_t pro_len;
     uint16_t op;
-    uint8_t src_mac[6];
-    in_addr src_ip;
-    uint8_t dst_mac[6];
-    in_addr dst_ip;
+    uint8_t sender_mac[6];
+    uint8_t sender_ip[4];
+    uint8_t target_mac[6];
+    uint8_t target_ip[4];
 };
 #pragma pack(pop)
 
@@ -76,7 +76,7 @@ uint8_t* get_mac(char *dev) {
 
 uint8_t* get_ip(char * dev) {
     struct ifreq ifr;
-    static uint8_t mip[4];
+    static uint8_t myip[4];
     struct sockaddr_in *sin ; //= (struct sockaddr_in *)&their_addr;
     int n = socket(AF_INET, SOCK_DGRAM, 0);
 
@@ -84,14 +84,14 @@ uint8_t* get_ip(char * dev) {
 
     if (0 == ioctl(n, SIOCGIFADDR, &ifr)) {
         sin = reinterpret_cast<struct sockaddr_in *>(&ifr.ifr_addr);
-        u_char *myip = (u_char *)&sin -> sin_addr.s_addr;
-        memcpy(&mip[0],myip,4);
+        u_char *ip = (u_char *)&sin -> sin_addr.s_addr;
+        memcpy(&myip[0],ip,4);
     }
     else {
         printf("!!! myip error !!!\n");
         exit(1);
     }
-    return mip;
+    return myip;
 }
 
 int main(int argc, char* argv[]) {
@@ -101,13 +101,13 @@ int main(int argc, char* argv[]) {
     }
 
     char* dev = argv[1];
-    char* senderIP = argv[2];
-    char* gatewayIP = argv[3];
+    char* TargetIP = argv[2];
+    char* SenderIP = argv[3];
+    char Targetmac[6];
     int i;
-    char v_mac[6];
 
     uint8_t *mymac = get_mac(dev);
-    uint8_t *mip = get_ip(dev);
+    uint8_t *myip = get_ip(dev);
 
     char errbuf[PCAP_ERRBUF_SIZE];
     pcap_t* handle = pcap_open_live(dev, BUFSIZ, 1, 1000, errbuf);
@@ -120,31 +120,27 @@ int main(int argc, char* argv[]) {
     static const int IPsize = 4;
 
 
-    EtherARPpacket reqpacket;
+    EtherARPpacket request_packet;
 
     for (i=0;i<6;i++) {
-        reqpacket.eth_.ether_dhost[i] = 0xff;
+        request_packet.eth_.ether_dhost[i] = 0xff;
     }
-    for (i=0;i<6;i++) {
-        reqpacket.eth_.ether_shost[i] = mymac[i];
-    }
-    reqpacket.eth_.ether_type = htons(Arp);
+    memcpy(&request_packet.eth_.ether_shost,mymac,6);
+    request_packet.eth_.ether_type = htons(Arp);
 
-    reqpacket.arp_.hrd_t = htons(ETHER);
-    reqpacket.arp_.pro_t = htons(Ip4);
-    reqpacket.arp_.hrd_len = MACsize;
-    reqpacket.arp_.pro_len = IPsize;
-    reqpacket.arp_.op = htons(Requset);
+    request_packet.arp_.hrd_t = htons(ETHER);
+    request_packet.arp_.pro_t = htons(Ip4);
+    request_packet.arp_.hrd_len = MACsize;
+    request_packet.arp_.pro_len = IPsize;
+    request_packet.arp_.op = htons(Requset);
+    memcpy(&request_packet.arp_.sender_mac,mymac,6);
+    memcpy(&request_packet.arp_.sender_ip, myip,4);
     for (i=0;i<6;i++) {
-        reqpacket.arp_.src_mac[i] = mymac[i];
+        request_packet.arp_.target_mac[i] = 0x00;
     }
-    memcpy(&reqpacket.arp_.src_ip, &mip, 4);
-    for (i=0;i<6;i++) {
-        reqpacket.arp_.dst_mac[i] = 0x00;
-    }
-    inet_pton(AF_INET,senderIP,&reqpacket.arp_.dst_ip);
+    inet_pton(AF_INET,TargetIP,&request_packet.arp_.target_ip);
 
-    int res = pcap_sendpacket(handle,reinterpret_cast<const u_char*>(&reqpacket),sizeof(EtherARPpacket));
+    int res = pcap_sendpacket(handle,reinterpret_cast<const u_char*>(&request_packet),sizeof(EtherARPpacket));
     if (res != 0) {
         fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
     }
@@ -168,14 +164,34 @@ int main(int argc, char* argv[]) {
                 packet += sizeof(struct ether_header);
                 struct arp_header* arp = (struct arp_header*)packet;
                 if (ntohs(arp->op) == Reply) {
-                    for (i=0;i<6;i++) {
-                        v_mac[i]=ether->ether_shost[i];
+
+                    memcpy(&Targetmac,ether->ether_shost,6);
+
+
+                    EtherARPpacket reply_packet;
+
+                    memcpy(&reply_packet.eth_.ether_dhost,Targetmac,6);
+                    memcpy(&reply_packet.eth_.ether_shost,mymac,6);
+                    reply_packet.eth_.ether_type = htons(Arp);
+
+                    reply_packet.arp_.hrd_t = htons(ETHER);
+                    reply_packet.arp_.pro_t = htons(Ip4);
+                    reply_packet.arp_.hrd_len = MACsize;
+                    reply_packet.arp_.pro_len = IPsize;
+                    reply_packet.arp_.op = htons(Reply);
+                    memcpy(&reply_packet.arp_.sender_mac,mymac,6);
+                    inet_pton(AF_INET,SenderIP,&reply_packet.arp_.sender_ip);
+                    memcpy(&reply_packet.arp_.target_mac,Targetmac,6);
+                    inet_pton(AF_INET,TargetIP,&reply_packet.arp_.target_ip);
+
+                    res = pcap_sendpacket(handle,reinterpret_cast<const u_char*>(&reply_packet),sizeof(EtherARPpacket));
+                    if (res != 0) {
+                        fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
                     }
                     break;
                 }
                 else {
                     printf("Not Reply...\n");
-                    return 0;
                 }
             }
             else {
@@ -183,35 +199,5 @@ int main(int argc, char* argv[]) {
                 return 0;
             }
     }
-
-    EtherARPpacket reppacket;
-
-    for (i=0;i<6;i++) {
-        reppacket.eth_.ether_dhost[i] = v_mac[i];
-    }
-    for (i=0;i<6;i++) {
-        reppacket.eth_.ether_shost[i] = mymac[i];
-    }
-    reppacket.eth_.ether_type = htons(Arp);
-
-    reppacket.arp_.hrd_t = htons(ETHER);
-    reppacket.arp_.pro_t = htons(Ip4);
-    reppacket.arp_.hrd_len = MACsize;
-    reppacket.arp_.pro_len = IPsize;
-    reppacket.arp_.op = htons(Reply);
-    for (i=0;i<6;i++) {
-        reppacket.arp_.src_mac[i] = mymac[i];
-    }
-    inet_pton(AF_INET,gatewayIP,&reppacket.arp_.src_ip);
-    for (i=0;i<6;i++) {
-        reppacket.arp_.dst_mac[i] = v_mac[i];
-    }
-    inet_pton(AF_INET,senderIP,&reppacket.arp_.dst_ip);
-
-    res = pcap_sendpacket(handle,reinterpret_cast<const u_char*>(&reppacket),sizeof(EtherARPpacket));
-    if (res != 0) {
-        fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
-    }
-
     pcap_close(handle);
 }
